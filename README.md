@@ -57,6 +57,26 @@ stay together in one folder. The jar bundles the parts of ASM and the Kotlin sta
 library it uses, relocated under `lcvr/` (see `tools/Shade.kt`), so nothing else needs to
 be installed for the game.
 
+### Nix
+
+The repo is a flake (x86_64-linux):
+
+```sh
+nix run github:AfkaraLP/lunarclient-steamvr-patch    # build, set up the 1.8 profile, start Lunar
+nix build                                             # result/share/lunar-vr/{lcvr.jar,liblcvr.so,libopenvr_api.so}
+nix develop                                           # toolchain + pinned deps; ./build.sh works offline
+nix profile install github:AfkaraLP/lunarclient-steamvr-patch   # puts `lunar-vr` on PATH
+```
+
+`nix run` and `lunar-vr` are the launch script below, pointed at the agent in the Nix store.
+`LCVR_OPTS` and `LUNAR_CMD` work as usual, and `lunarclient` is taken from `PATH`. The
+store path is written into the profile on every launch, so after an update or garbage
+collection just launch through `lunar-vr` again. There's also `overlays.default`, which
+provides `pkgs.lunar-vr`.
+
+Debug dumps go to `~/.cache/lcvr/debug/` when the agent runs from the read-only store. In a
+source checkout they go to `debug/`. `-Dlcvr.debugDir=...` overrides both.
+
 ## Install and run
 
 1. Start SteamVR and connect your headset.
@@ -134,10 +154,11 @@ Look for the `[lcvr]` lines in `~/.lunarclient/profiles/1.8/logs/latest.log`.
   to retry.
 - **`framebuffers seem disabled`:** turn off Fast Render.
 - **Low FPS or judder:** lower `scale`. Minecraft renders the world twice per frame.
-- **Frame dump:** run `mkdir -p debug && touch debug/request` while in game. Within a second
-  `debug/` contains `eye0.png`, `eye1.png`, `hud.png`, `mirror.png` and `state.txt` (pose,
-  projection, angles), showing exactly what's sent to the headset. `-Dlcvr.dump=true` also
-  writes the patched class.
+- **Frame dump:** run `mkdir -p debug && touch debug/request` while in game (or
+  `~/.cache/lcvr/debug/` when installed with Nix). Within a second the folder contains
+  `eye0.png`, `eye1.png`, `hud.png`, `mirror.png` and `state.txt` (pose, projection,
+  angles), showing exactly what's sent to the headset. `-Dlcvr.dump=true` also writes the
+  patched class there.
 
 ## How it works
 

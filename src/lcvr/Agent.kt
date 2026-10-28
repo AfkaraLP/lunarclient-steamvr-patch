@@ -14,6 +14,16 @@ object Agent {
     lateinit var inst: Instrumentation
     lateinit var home: File
 
+    /**
+     * Where debug dumps go: -Dlcvr.debugDir if set, else `debug/` next to dist/ when that is
+     * writable (a source checkout), else ~/.cache/lcvr/debug (e.g. installed in the Nix store).
+     */
+    val debugDir: File by lazy {
+        System.getProperty("lcvr.debugDir")?.let(::File)
+            ?: home.parentFile?.takeIf { it.canWrite() }?.let { File(it, "debug") }
+            ?: File(System.getenv("XDG_CACHE_HOME") ?: (System.getProperty("user.home") + "/.cache"), "lcvr/debug")
+    }
+
     /** Static (via @JvmStatic) so the JVM finds `lcvr.Agent.premain(String, Instrumentation)`. */
     @JvmStatic
     fun premain(args: String?, instrumentation: Instrumentation) {

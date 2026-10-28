@@ -32,7 +32,7 @@ class Patcher : ClassFileTransformer {
         return try {
             gameLoader = loader
             patch(bytes).also { out ->
-                if (java.lang.Boolean.getBoolean("lcvr.dump")) File(Agent.home, "EntityRenderer.patched.class").writeBytes(out)
+                if (java.lang.Boolean.getBoolean("lcvr.dump")) File(Agent.debugDir.apply { mkdirs() }, "EntityRenderer.patched.class").writeBytes(out)
             }
         } catch (t: Throwable) {
             Hooks.log("failed to patch EntityRenderer, VR disabled: $t")

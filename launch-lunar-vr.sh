@@ -3,10 +3,12 @@
 # overrides beat the global setting, and Lunar resets the JAVA_*_OPTIONS env vars), then
 # starts Lunar. Existing arguments, e.g. -Duser.timezone, are kept.
 # Optional agent options: LCVR_OPTS="hudDist=1.2,scale=0.9" ./launch-lunar-vr.sh
+# LCVR_DIST overrides where lcvr.jar and its native libraries are (the Nix package sets it).
 set -eu
 dir="$(dirname "$(readlink -f "$0")")"
 db="$HOME/.lunarclient/db/profiles.db"
-agent="-javaagent:$dir/dist/lcvr.jar${LCVR_OPTS:+=$LCVR_OPTS}"
+dist="${LCVR_DIST:-$dir/dist}"
+agent="-javaagent:$dist/lcvr.jar${LCVR_OPTS:+=$LCVR_OPTS}"
 
 sqlite() {
   if command -v sqlite3 >/dev/null 2>&1; then sqlite3 "$@"

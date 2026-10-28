@@ -5,3 +5,5 @@
 /third_party/
 # runtime debug dumps
 /debug/
+# nix build output
+/result*

@@ -5,12 +5,13 @@ import java.io.File
 import javax.imageio.ImageIO
 
 /**
- * Creating debug/request (next to dist/) makes the agent write what it is sending to the
- * headset: both eye images, the HUD texture, the desktop mirror and the tracking state.
+ * Creating `request` in [Agent.debugDir] (`debug/` in a source checkout) makes the agent
+ * write what it is sending to the headset: both eye images, the HUD texture, the desktop
+ * mirror and the tracking state.
  */
 object Debug {
     fun maybeDump(mc: Any, mainFb: Any, hadEyes: Boolean) {
-        val dir = File(Agent.home.parentFile, "debug")
+        val dir = Agent.debugDir
         val request = File(dir, "request")
         if (!request.exists()) return
         request.delete()
