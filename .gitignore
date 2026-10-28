@@ -1,0 +1,7 @@
+# build outputs (build.sh recreates them)
+/build/
+/dist/
+# downloaded by build.sh
+/third_party/
+# runtime debug dumps
+/debug/
