@@ -42,17 +42,20 @@ on 1.8.9. This project hooks Lunar's 1.8.9 renderer directly with a `-javaagent`
 
 ## Build
 
-You need JDK 17+, g++ and curl. `build.sh` downloads ASM and the OpenVR SDK into
-`third_party/`.
+The agent is written in Kotlin and the headset bridge in C++. You need `kotlinc` 2.x, a
+JDK 17+ (for `java` and the JNI headers), g++ and curl. `build.sh` downloads ASM and the
+OpenVR SDK into `third_party/`.
 
 ```sh
 ./build.sh
 # NixOS:
-nix shell nixpkgs#jdk17 nixpkgs#gcc -c ./build.sh
+nix shell nixpkgs#kotlin nixpkgs#jdk17 nixpkgs#gcc -c ./build.sh
 ```
 
 This produces `dist/lcvr.jar`, `dist/liblcvr.so` and `dist/libopenvr_api.so`, which must
-stay together in one folder.
+stay together in one folder. The jar bundles the parts of ASM and the Kotlin standard
+library it uses, relocated under `lcvr/` (see `tools/Shade.kt`), so nothing else needs to
+be installed for the game.
 
 ## Install and run
 
@@ -138,7 +141,7 @@ Look for the `[lcvr]` lines in `~/.lunarclient/profiles/1.8/logs/latest.log`.
 
 ## How it works
 
-`src/lcvr/Patcher.java` rewrites `net.minecraft.client.renderer.EntityRenderer` as Lunar
+`src/lcvr/Patcher.kt` rewrites `net.minecraft.client.renderer.EntityRenderer` as Lunar
 defines it. The injected code is straight-line only, so the existing stack map frames stay
 valid:
 
