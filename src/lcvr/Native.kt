@@ -6,8 +6,11 @@ package lcvr
  * `Java_lcvr_Native_*`.
  */
 object Native {
-    /** Returns null on success, otherwise a human-readable error. */
-    @JvmStatic external fun init(): String?
+    /**
+     * Returns null on success, otherwise a human-readable error. With inputDir, an action
+     * manifest for eye tracking is written there and loaded.
+     */
+    @JvmStatic external fun init(inputDir: String?): String?
 
     @JvmStatic external fun recommendedSize(): IntArray
 
@@ -48,4 +51,15 @@ object Native {
 
     /** Binds fbo and attaches textures[0..n) as its color attachments, leaving it bound. */
     @JvmStatic external fun attachColorTextures(fbo: Int, textures: IntArray, n: Int)
+
+    /** Sets up variable rate shading for w x h eye buffers. Null on success, otherwise why it is unavailable. */
+    @JvmStatic external fun foveationInit(w: Int, h: Int): String?
+
+    /** Eye-tracked gaze per eye as projection NDC {lx, ly, rx, ry}; false without valid eye tracking. */
+    @JvmStatic external fun eyeGaze(out4: FloatArray): Boolean
+
+    /** Turns on foveated shading around NDC (cx, cy), NaN = straight ahead; radii in degrees. */
+    @JvmStatic external fun foveationBegin(eye: Int, cx: Float, cy: Float, inner: Float, outer: Float)
+
+    @JvmStatic external fun foveationEnd()
 }

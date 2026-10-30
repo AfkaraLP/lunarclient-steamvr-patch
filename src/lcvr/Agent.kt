@@ -8,7 +8,7 @@ import java.lang.instrument.Instrumentation
  * ```
  * -javaagent:/path/to/lunar-vr/dist/lcvr.jar[=key=value,key=value]
  * ```
- * Keys: hudDist, hudWidth, scale, recenterKey, mirror, positional.
+ * Keys: hudDist, hudWidth, scale, recenterKey, mirror, positional, foveation, foveaInner, foveaOuter.
  */
 object Agent {
     lateinit var inst: Instrumentation
@@ -21,7 +21,12 @@ object Agent {
     val debugDir: File by lazy {
         System.getProperty("lcvr.debugDir")?.let(::File)
             ?: home.parentFile?.takeIf { it.canWrite() }?.let { File(it, "debug") }
-            ?: File(System.getenv("XDG_CACHE_HOME") ?: (System.getProperty("user.home") + "/.cache"), "lcvr/debug")
+            ?: File(cacheDir, "debug")
+    }
+
+    /** ~/.cache/lcvr (or under $XDG_CACHE_HOME): generated files such as the SteamVR action manifest. */
+    val cacheDir: File by lazy {
+        File(System.getenv("XDG_CACHE_HOME") ?: (System.getProperty("user.home") + "/.cache"), "lcvr")
     }
 
     /** Static (via @JvmStatic) so the JVM finds `lcvr.Agent.premain(String, Instrumentation)`. */

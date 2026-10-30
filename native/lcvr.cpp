@@ -14,6 +14,7 @@
 #include <cstring>
 #include <cstdarg>
 #include <string>
+#include <vector>
 
 #include <openvr.h>
 
@@ -88,6 +89,25 @@ typedef unsigned char GLboolean;
 #define GL_QUADS 0x0007
 #define GL_ARRAY_BUFFER_BINDING 0x8894
 #define GL_ARRAY_BUFFER 0x8892
+#define GL_EXTENSIONS 0x1F03
+#define GL_NUM_EXTENSIONS 0x821D
+#define GL_R8UI 0x8232
+#define GL_RED_INTEGER 0x8D94
+#define GL_UNPACK_ALIGNMENT 0x0CF5
+#define GL_PIXEL_UNPACK_BUFFER 0x88EC
+#define GL_PIXEL_UNPACK_BUFFER_BINDING 0x88EF
+#define GL_UNPACK_ROW_LENGTH 0x0CF2
+#define GL_UNPACK_SKIP_ROWS 0x0CF3
+#define GL_UNPACK_SKIP_PIXELS 0x0CF4
+#define GL_CLIENT_PIXEL_STORE_BIT 0x00000001
+// GL_NV_shading_rate_image
+#define GL_SHADING_RATE_IMAGE_NV 0x9563
+#define GL_SHADING_RATE_1_INVOCATION_PER_PIXEL_NV 0x9565
+#define GL_SHADING_RATE_1_INVOCATION_PER_2X2_PIXELS_NV 0x9568
+#define GL_SHADING_RATE_1_INVOCATION_PER_4X4_PIXELS_NV 0x956B
+#define GL_SHADING_RATE_IMAGE_TEXEL_WIDTH_NV 0x955C
+#define GL_SHADING_RATE_IMAGE_TEXEL_HEIGHT_NV 0x955D
+#define GL_SHADING_RATE_IMAGE_PALETTE_SIZE_NV 0x955E
 
 #define GLFN(ret, name, args) typedef ret (*PFN_##name) args; static PFN_##name p_##name;
 GLFN(void, glPushAttrib, (GLbitfield))
@@ -132,10 +152,21 @@ GLFN(GLenum, glCheckFramebufferStatus, (GLenum))
 GLFN(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum))
 GLFN(void, glGetTexImage, (GLenum, GLint, GLenum, GLenum, void*))
 GLFN(GLenum, glGetError, ())
+// optional: only foveated rendering needs these (see foveationInit)
+GLFN(const unsigned char*, glGetStringi, (GLenum, GLuint))
+GLFN(void, glTexStorage2D, (GLenum, GLsizei, GLenum, GLsizei, GLsizei))
+GLFN(void, glTexSubImage2D, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void*))
+GLFN(void, glPixelStorei, (GLenum, GLint))
+GLFN(void, glPushClientAttrib, (GLbitfield))
+GLFN(void, glPopClientAttrib, ())
+GLFN(void, glBindShadingRateImageNV, (GLuint))
+GLFN(void, glShadingRateImagePaletteNV, (GLuint, GLuint, GLsizei, const GLenum*))
 
 typedef void* (*PFN_glXGetProcAddressARB)(const unsigned char*);
 
 static bool glLoaded = false;
+static void* g_glLib = nullptr;
+static PFN_glXGetProcAddressARB g_gpa = nullptr;
 
 static void* glSym(void* lib, PFN_glXGetProcAddressARB gpa, const char* name) {
     void* p = dlsym(lib, name);
@@ -151,6 +182,8 @@ static bool loadGL() {
     if (!lib) lib = dlopen("libGL.so", RTLD_LAZY);
     if (!lib) return false;
     PFN_glXGetProcAddressARB gpa = (PFN_glXGetProcAddressARB)dlsym(lib, "glXGetProcAddressARB");
+    g_glLib = lib;
+    g_gpa = gpa;
     bool ok = true;
 #define LOAD(name) ok &= (p_##name = (PFN_##name)glSym(lib, gpa, #name)) != nullptr;
     LOAD(glPushAttrib) LOAD(glPopAttrib) LOAD(glGetIntegerv) LOAD(glBindTexture) LOAD(glGenTextures)
@@ -263,7 +296,95 @@ static const char* initError(vr::EVRInitError e) {
 
 extern "C" {
 
-JNIEXPORT jstring JNICALL Java_lcvr_Native_init(JNIEnv* env, jclass) {
+// Eye tracking (Steam Frame over Steam Link) is an IVRInput "eyetracking" component, read
+// through an action from our action manifest.
+static vr::VRActionSetHandle_t g_actionSet = vr::k_ulInvalidActionSetHandle;
+static vr::VRActionHandle_t g_gazeAction = vr::k_ulInvalidActionHandle;
+static vr::HmdMatrix34_t g_hmdPose;
+static bool g_hmdPoseValid = false;
+static int g_gazeErrorReports = 0;
+
+static bool writeFile(const std::string& path, const std::string& text) {
+    FILE* f = fopen(path.c_str(), "w");
+    if (!f) return false;
+    bool ok = fwrite(text.data(), 1, text.size(), f) == text.size();
+    return fclose(f) == 0 && ok;
+}
+
+static std::string hmdString(vr::ETrackedDeviceProperty prop) {
+    char buf[256] = "";
+    g_sys->GetStringTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd, prop, buf, sizeof buf);
+    return buf;
+}
+
+// Writes an action manifest with one eyetracking action into dir, with default bindings to
+// the headset's eye tracker, and loads it. The input system picks bindings by the type in
+// the headset's input profile, which can differ from Prop_ControllerType (the Steam Frame
+// reports "rift" there but its input type is "frame_hmd"), so every candidate gets a binding.
+static void initInput(JNIEnv* env, jstring dirStr) {
+    g_actionSet = vr::k_ulInvalidActionSetHandle;
+    g_gazeAction = vr::k_ulInvalidActionHandle;
+    g_gazeErrorReports = 0;
+    std::string type = hmdString(vr::Prop_ControllerType_String);
+    std::string profile = hmdString(vr::Prop_InputProfilePath_String);
+    lcvrLog("headset controller type '%s', input profile '%s', eye gaze %s", type.c_str(), profile.c_str(),
+            g_sys->GetBoolTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_SupportsXrEyeGazeInteraction_Bool)
+                ? "supported" : "not reported");
+    if (!dirStr || !vr::VRInput()) return;
+    std::vector<std::string> types = {"frame_hmd"};
+    auto add = [&types](const std::string& t) {
+        if (t.empty() || t.find_first_of("\"\\/{}") != std::string::npos) return;
+        for (const std::string& x : types)
+            if (x == t) return;
+        types.push_back(t);
+    };
+    add(type);
+    // "{frame_hmd}/input/input_profile.json": the driver name usually is the input type
+    if (profile.size() > 2 && profile[0] == '{') add(profile.substr(1, profile.find('}') - 1));
+
+    const char* d = env->GetStringUTFChars(dirStr, nullptr);
+    std::string dir = d;
+    env->ReleaseStringUTFChars(dirStr, d);
+    std::string defaults;
+    bool written = true;
+    for (const std::string& t : types) {
+        std::string file = "bindings_" + t + ".json";
+        if (!defaults.empty()) defaults += ",\n    ";
+        defaults += "{\"controller_type\": \"" + t + "\", \"binding_url\": \"" + file + "\"}";
+        written &= writeFile(dir + "/" + file,
+                             "{\n"
+                             "  \"action_manifest_version\": 0,\n"
+                             "  \"controller_type\": \"" + t + "\",\n"
+                             "  \"name\": \"lunar-vr eye tracking\",\n"
+                             "  \"description\": \"Eye gaze for foveated rendering\",\n"
+                             "  \"bindings\": {\"/actions/lcvr\": {\"eyetracking\": [\n"
+                             "    {\"output\": \"/actions/lcvr/in/gaze\", \"path\": \"/user/head/eyetracking\"}\n"
+                             "  ]}}\n"
+                             "}\n");
+    }
+    std::string manifest =
+        "{\n"
+        "  \"default_bindings\": [\n    " + defaults + "\n  ],\n"
+        "  \"action_sets\": [{\"name\": \"/actions/lcvr\", \"usage\": \"single\"}],\n"
+        "  \"actions\": [{\"name\": \"/actions/lcvr/in/gaze\", \"type\": \"eyetracking\"}],\n"
+        "  \"localization\": [{\"language_tag\": \"en_US\", \"/actions/lcvr\": \"Lunar VR\",\n"
+        "                      \"/actions/lcvr/in/gaze\": \"Eye gaze (foveated rendering)\"}]\n"
+        "}\n";
+    std::string manifestPath = dir + "/actions.json";
+    if (!written || !writeFile(manifestPath, manifest)) {
+        lcvrLog("could not write the action manifest to %s; no eye tracking", dir.c_str());
+        return;
+    }
+    vr::EVRInputError e = vr::VRInput()->SetActionManifestPath(manifestPath.c_str());
+    if (e == vr::VRInputError_None) e = vr::VRInput()->GetActionSetHandle("/actions/lcvr", &g_actionSet);
+    if (e == vr::VRInputError_None) e = vr::VRInput()->GetActionHandle("/actions/lcvr/in/gaze", &g_gazeAction);
+    if (e != vr::VRInputError_None) {
+        lcvrLog("action manifest not loaded (EVRInputError %d); no eye tracking", (int)e);
+        g_gazeAction = vr::k_ulInvalidActionHandle;
+    }
+}
+
+JNIEXPORT jstring JNICALL Java_lcvr_Native_init(JNIEnv* env, jclass, jstring inputDir) {
     if (!loadGL()) return env->NewStringUTF("could not resolve OpenGL entry points");
     if (g_sys) return nullptr;
     if (!vr::VR_IsRuntimeInstalled()) return env->NewStringUTF("SteamVR runtime is not installed/registered");
@@ -281,6 +402,7 @@ JNIEXPORT jstring JNICALL Java_lcvr_Native_init(JNIEnv* env, jclass) {
         return env->NewStringUTF("SteamVR compositor unavailable");
     }
     vr::VRCompositor()->SetTrackingSpace(vr::TrackingUniverseSeated);
+    initInput(env, inputDir); // before the first PollNextEvent, as SetActionManifestPath requires
 
     return nullptr;
 }
@@ -314,6 +436,8 @@ JNIEXPORT jint JNICALL Java_lcvr_Native_waitGetPoses(JNIEnv* env, jclass, jfloat
     vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
     vr::VRCompositor()->WaitGetPoses(poses, vr::k_unMaxTrackedDeviceCount, nullptr, 0);
     const vr::TrackedDevicePose_t& hmd = poses[vr::k_unTrackedDeviceIndex_Hmd];
+    g_hmdPoseValid = hmd.bPoseIsValid;
+    g_hmdPose = hmd.mDeviceToAbsoluteTracking;
     if (!hmd.bPoseIsValid) return 0;
     jfloat m[12];
     for (int r = 0; r < 3; r++)
@@ -553,6 +677,228 @@ JNIEXPORT void JNICALL Java_lcvr_Native_attachColorTextures(JNIEnv* env, jclass,
     for (int i = 0; i < n; i++)
         p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, (GLuint)tex[i], 0);
     checkGL("attachColorTextures", false);
+}
+
+// ---------------------------------------------------------------------------------------
+// Foveated rendering through variable rate shading (GL_NV_shading_rate_image, NVIDIA
+// Turing and newer). Each eye has a small R8UI image with one texel per tile (16x16 pixels
+// on current GPUs) holding a palette index: 0 = full rate, 1 = one fragment shader
+// invocation per 2x2 pixels, 2 = per 4x4. Index 0 is full rate, so anything the driver
+// treats as outside the image stays sharp.
+
+static bool g_foveaOk = false;
+static GLuint g_foveaTex[2] = {0, 0};
+static int g_foveaW = 0, g_foveaH = 0, g_tileW = 16, g_tileH = 16, g_foveaPxW = 0, g_foveaPxH = 0;
+static float g_foveaProj[2][4]; // P00, P02, P11, P12 of each eye's GetProjectionMatrix
+static std::vector<unsigned char> g_foveaBuf;
+
+static bool hasExtension(const char* name) {
+    GLint n = 0;
+    p_glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+    for (GLint i = 0; i < n; i++) {
+        const char* e = (const char*)p_glGetStringi(GL_EXTENSIONS, (GLuint)i);
+        if (e && strcmp(e, name) == 0) return true;
+    }
+    return false;
+}
+
+// Prepares foveation for eye buffers of w x h pixels. Returns null on success, otherwise
+// why it is unavailable.
+JNIEXPORT jstring JNICALL Java_lcvr_Native_foveationInit(JNIEnv* env, jclass, jint w, jint h) {
+    g_foveaOk = false;
+    if (!g_sys || !loadGL()) return env->NewStringUTF("VR not initialized");
+    bool ok = true;
+#define LOAD(name) ok &= (p_##name = (PFN_##name)glSym(g_glLib, g_gpa, #name)) != nullptr;
+    LOAD(glGetStringi) LOAD(glTexStorage2D) LOAD(glTexSubImage2D) LOAD(glPixelStorei)
+    LOAD(glPushClientAttrib) LOAD(glPopClientAttrib) LOAD(glBindShadingRateImageNV) LOAD(glShadingRateImagePaletteNV)
+#undef LOAD
+    if (!ok) return env->NewStringUTF("GL entry points missing");
+    checkGL(__func__, true);
+    // glXGetProcAddress hands out pointers for unsupported functions too, so ask the driver
+    if (!hasExtension("GL_NV_shading_rate_image"))
+        return env->NewStringUTF("the GPU/driver has no GL_NV_shading_rate_image (needs NVIDIA GTX 16xx/RTX 20xx or newer)");
+    GLint tw = 0, th = 0, paletteSize = 0;
+    p_glGetIntegerv(GL_SHADING_RATE_IMAGE_TEXEL_WIDTH_NV, &tw);
+    p_glGetIntegerv(GL_SHADING_RATE_IMAGE_TEXEL_HEIGHT_NV, &th);
+    p_glGetIntegerv(GL_SHADING_RATE_IMAGE_PALETTE_SIZE_NV, &paletteSize);
+    if (tw <= 0 || th <= 0 || paletteSize < 3) return env->NewStringUTF("unusable shading rate image limits");
+
+    int fw = (w + tw - 1) / tw, fh = (h + th - 1) / th;
+    SavedBindings s;
+    s.save(__func__);
+    if (fw != g_foveaW || fh != g_foveaH || !g_foveaTex[0]) {
+        if (g_foveaTex[0]) p_glDeleteTextures(2, g_foveaTex);
+        p_glGenTextures(2, g_foveaTex);
+        for (GLuint t : g_foveaTex) {
+            p_glBindTexture(GL_TEXTURE_2D, t);
+            p_glTexStorage2D(GL_TEXTURE_2D, 1, GL_R8UI, fw, fh); // must be immutable R8UI
+        }
+        g_foveaW = fw;
+        g_foveaH = fh;
+        g_foveaBuf.assign((size_t)fw * fh, 0);
+    }
+    p_glBindShadingRateImageNV(g_foveaTex[0]);
+    GLenum err = p_glGetError();
+    p_glBindShadingRateImageNV(0);
+    s.restore();
+    if (err) {
+        char buf[64];
+        snprintf(buf, sizeof buf, "shading rate image rejected (GL error 0x%x)", err);
+        return env->NewStringUTF(buf);
+    }
+    for (int e = 0; e < 2; e++) {
+        vr::HmdMatrix44_t p = g_sys->GetProjectionMatrix(e == 0 ? vr::Eye_Left : vr::Eye_Right, 0.05f, 100.0f);
+        g_foveaProj[e][0] = p.m[0][0];
+        g_foveaProj[e][1] = p.m[0][2];
+        g_foveaProj[e][2] = p.m[1][1];
+        g_foveaProj[e][3] = p.m[1][2];
+    }
+    g_tileW = tw;
+    g_tileH = th;
+    g_foveaPxW = w;
+    g_foveaPxH = h;
+    g_foveaOk = true;
+    return nullptr;
+}
+
+// Projects a point in head space into an eye's NDC. False if it is behind the eye.
+static bool headToNdc(int eye, const float* p, float* ndc) {
+    vr::EVREye e = eye == 0 ? vr::Eye_Left : vr::Eye_Right;
+    vr::HmdMatrix34_t eh = g_sys->GetEyeToHeadTransform(e);
+    float d[3], q[3];
+    for (int i = 0; i < 3; i++) d[i] = p[i] - eh.m[i][3];
+    for (int i = 0; i < 3; i++) q[i] = eh.m[0][i] * d[0] + eh.m[1][i] * d[1] + eh.m[2][i] * d[2]; // R^T d
+    vr::HmdMatrix44_t m = g_sys->GetProjectionMatrix(e, 0.05f, 100.0f);
+    float c[4];
+    for (int r = 0; r < 4; r++) c[r] = m.m[r][0] * q[0] + m.m[r][1] * q[1] + m.m[r][2] * q[2] + m.m[r][3];
+    if (c[3] <= 1e-4f) return false;
+    ndc[0] = c[0] / c[3];
+    ndc[1] = c[1] / c[3];
+    return true;
+}
+
+// Gaze from the eyetracking action, out = {leftX, leftY, rightX, rightY} in eye NDC.
+static bool gazeFromInput(float* out) {
+    if (g_gazeAction == vr::k_ulInvalidActionHandle || !g_hmdPoseValid) return false;
+    vr::VRActiveActionSet_t set = {};
+    set.ulActionSet = g_actionSet;
+    vr::VRInput()->UpdateActionState(&set, sizeof set, 1);
+    vr::VREyeTrackingData_t d = {};
+    vr::EVRInputError e = vr::VRInput()->GetEyeTrackingDataForNextFrame(g_gazeAction, vr::TrackingUniverseSeated, &d, sizeof d);
+    if (e != vr::VRInputError_None) {
+        if (g_gazeErrorReports < 5) lcvrLog("eye tracking read failed (EVRInputError %d)", (int)e);
+        g_gazeErrorReports++;
+        return false;
+    }
+    if (!d.bActive || !d.bValid) return false;
+    // Follow the gaze direction to a point 5 m out (stabler than the vergence-based fixation
+    // point), move it into head space, then project it into each eye.
+    float dir[3], len = 0;
+    for (int i = 0; i < 3; i++) {
+        dir[i] = d.vGazeTarget.v[i] - d.vGazeOrigin.v[i];
+        len += dir[i] * dir[i];
+    }
+    len = sqrtf(len);
+    if (len < 1e-6f) return false;
+    const vr::HmdMatrix34_t& h = g_hmdPose;
+    float w[3], rel[3], head[3];
+    for (int i = 0; i < 3; i++) w[i] = d.vGazeOrigin.v[i] + dir[i] / len * 5.0f;
+    for (int i = 0; i < 3; i++) rel[i] = w[i] - h.m[i][3];
+    for (int i = 0; i < 3; i++) head[i] = h.m[0][i] * rel[0] + h.m[1][i] * rel[1] + h.m[2][i] * rel[2];
+    return headToNdc(0, head, out) && headToNdc(1, head, out + 2);
+}
+
+// Where the eyes look, as NDC of each eye's projection (the one the eye buffers are rendered
+// with): out = {leftX, leftY, rightX, rightY}. Call once per frame, after waitGetPoses.
+// False without an eye tracker, and briefly while it has no valid gaze (blinks).
+JNIEXPORT jboolean JNICALL Java_lcvr_Native_eyeGaze(JNIEnv* env, jclass, jfloatArray out) {
+    if (!g_sys) return JNI_FALSE;
+    static int source = 0;
+    float v[4];
+    int now = 0;
+    if (gazeFromInput(v)) {
+        now = 1;
+    } else {
+        vr::HmdVector2_t l, r;
+        if (g_sys->GetEyeTrackedFoveationCenter(&l, &r)) {
+            v[0] = l.v[0], v[1] = l.v[1], v[2] = r.v[0], v[3] = r.v[1];
+            now = 2;
+        }
+    }
+    if (!now) return JNI_FALSE;
+    if (now != source) {
+        lcvrLog("gaze from %s", now == 1 ? "the eyetracking input action" : "GetEyeTrackedFoveationCenter");
+        source = now;
+    }
+    env->SetFloatArrayRegion(out, 0, 4, v);
+    return JNI_TRUE;
+}
+
+// Before an eye's world pass: rebuilds that eye's rate image around NDC (cx, cy), or the
+// straight-ahead point if either is NaN, and turns variable rate shading on. inner and outer
+// are angles in degrees from that point: full rate inside inner, 2x2 up to outer, 4x4 beyond.
+JNIEXPORT void JNICALL Java_lcvr_Native_foveationBegin(JNIEnv*, jclass, jint eye, jfloat cx, jfloat cy,
+                                                      jfloat inner, jfloat outer) {
+    if (!g_foveaOk) return;
+    eye &= 1;
+    const float* p = g_foveaProj[eye];
+    // NDC -> unit view direction: on the z = -1 plane, x_ndc = P00 * x - P02 (same for y)
+    auto dir = [p](float x, float y, float* d) {
+        d[0] = (x + p[1]) / p[0];
+        d[1] = (y + p[3]) / p[2];
+        float n = 1 / sqrtf(d[0] * d[0] + d[1] * d[1] + 1);
+        d[0] *= n;
+        d[1] *= n;
+        d[2] = -n;
+    };
+    if (std::isnan(cx) || std::isnan(cy)) {
+        cx = -p[1];
+        cy = -p[3];
+    }
+    float g[3], d[3];
+    dir(cx, cy, g);
+    float cosIn = cosf(inner * (float)M_PI / 180), cosOut = cosf(outer * (float)M_PI / 180);
+    unsigned char* img = g_foveaBuf.data();
+    for (int ty = 0; ty < g_foveaH; ty++) {
+        float y = 2 * (ty + 0.5f) * g_tileH / g_foveaPxH - 1;
+        for (int tx = 0; tx < g_foveaW; tx++) {
+            float x = 2 * (tx + 0.5f) * g_tileW / g_foveaPxW - 1;
+            dir(x, y, d);
+            float c = d[0] * g[0] + d[1] * g[1] + d[2] * g[2];
+            *img++ = c >= cosIn ? 0 : c >= cosOut ? 1 : 2;
+        }
+    }
+
+    SavedBindings s;
+    s.save(__func__);
+    GLint unpackBuf = 0;
+    p_glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuf);
+    p_glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    p_glPushClientAttrib(GL_CLIENT_PIXEL_STORE_BIT);
+    p_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    p_glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    p_glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    p_glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    p_glBindTexture(GL_TEXTURE_2D, g_foveaTex[eye]);
+    p_glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, g_foveaW, g_foveaH, GL_RED_INTEGER, GL_UNSIGNED_BYTE, g_foveaBuf.data());
+    p_glPopClientAttrib();
+    p_glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)unpackBuf);
+    s.restore();
+
+    // set after the attribute pop, in case the driver counts these as enable/attribute state
+    static const GLenum rates[3] = {GL_SHADING_RATE_1_INVOCATION_PER_PIXEL_NV,
+                                    GL_SHADING_RATE_1_INVOCATION_PER_2X2_PIXELS_NV,
+                                    GL_SHADING_RATE_1_INVOCATION_PER_4X4_PIXELS_NV};
+    p_glShadingRateImagePaletteNV(0, 0, 3, rates);
+    p_glBindShadingRateImageNV(g_foveaTex[eye]);
+    p_glEnable(GL_SHADING_RATE_IMAGE_NV);
+}
+
+// After an eye's world pass: back to full rate for everything else (HUD, mirror, shadows).
+JNIEXPORT void JNICALL Java_lcvr_Native_foveationEnd(JNIEnv*, jclass) {
+    if (!g_foveaOk) return;
+    p_glDisable(GL_SHADING_RATE_IMAGE_NV);
+    p_glBindShadingRateImageNV(0);
 }
 
 JNIEXPORT jstring JNICALL Java_lcvr_Native_drainLog(JNIEnv* env, jclass) {

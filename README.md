@@ -28,6 +28,7 @@ on 1.8.9. This project hooks Lunar's 1.8.9 renderer directly with a `-javaagent`
   drawn mouse cursor for menus.
 - The desktop window mirrors the left eye.
 - OptiFine shader packs work per eye (experimental, see [Shaders](#shaders)).
+- Eye-tracked foveated rendering on NVIDIA GPUs (see [Foveated rendering](#foveated-rendering)).
 - Fails safe: if anything goes wrong, VR turns off and the game keeps running.
 
 ## Compatibility
@@ -143,6 +144,35 @@ or append `=key=value,...` to the `-javaagent` path.
 | `recenterKey` | `199` | LWJGL key code for recenter / retry VR start (199 = Home) |
 | `mirror` | `true` | show the left eye in the desktop window |
 | `positional` | `true` | apply head translation (leaning) |
+| `foveation` | `eye` | foveated rendering: `eye` (follows your gaze), `fixed` (lens center) or `off`, see [Foveated rendering](#foveated-rendering) |
+| `foveaInner` | `20` | degrees around the fovea center shaded at full rate |
+| `foveaOuter` | `35` | degrees out to which one shade per 2x2 pixels is used; beyond it, per 4x4 |
+
+## Foveated rendering
+
+On headsets with eye tracking (Steam Frame), the world is shaded at full rate only around
+where you're looking. Further out, one fragment is shaded per 2x2 pixels, and beyond
+`foveaOuter` per 4x4. Geometry and edges stay at full resolution; only shading gets coarser.
+It uses variable rate shading (`GL_NV_shading_rate_image`), so it needs an **NVIDIA GTX 16xx /
+RTX 20xx or newer**. On other GPUs the log says `foveated rendering unavailable` and
+everything renders as before.
+
+- The gaze comes from SteamVR's eye tracking input. The agent writes an action manifest that
+  binds it to `/user/head/eyetracking` into `~/.cache/lcvr/input/`, and falls back to
+  `IVRSystem::GetEyeTrackedFoveationCenter`. The log says `eye tracking active` once gaze
+  arrives, or warns after 10 s without it. During blinks the last gaze is kept for half a
+  second, then the lens center is used until tracking returns.
+- Without eye tracking, `foveation=eye` does nothing. `foveation=fixed` foveates around the
+  lens center on any headset.
+- Only the world and hand are foveated. The HUD, menus and the OptiFine shadow map are always
+  full rate.
+- The gain depends on where the frame time goes. Vanilla Minecraft is mostly limited by the CPU,
+  so expect little there. Shader packs are limited by fragment shading, and that's where it helps.
+  Keep the shader pack's **Render Quality** at 1x, since the rate image is sized for the eye buffer.
+- The desktop mirror shows the left eye with its blurry periphery.
+- If the sharp area seems to sit somewhere other than where you look, drop a frame dump
+  (see [Troubleshooting](#troubleshooting)): `state.txt` lists the gaze in NDC, and `eye0.png`
+  shows where it's sharp. Please report it, along with your headset.
 
 ## Troubleshooting
 

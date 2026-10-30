@@ -34,6 +34,9 @@ object Hooks {
     var recenterKey = 199 // LWJGL Keyboard.KEY_HOME
     var mirror = true
     var positional = true
+    var foveation = "eye" // eye (gaze-tracked), fixed (lens center) or off
+    var foveaInner = 20f // degrees around the fovea center rendered at full rate
+    var foveaOuter = 35f // beyond this, one shade per 4x4 pixels; in between per 2x2
 
     // ---- state ----
     var nativeOk = false
@@ -67,6 +70,15 @@ object Hooks {
     private var worldH = 0
     private var frames = 0L
     private const val MAX_OFFSET = 0.8
+
+    private var foveaOk = false
+    var foveaOn = false // foveate this frame's eye passes
+    val gaze = FloatArray(4) // last valid gaze, NDC per eye
+    val foveaCenter = FloatArray(4) // what this frame foveates around; NaN = lens center
+    private var gazeEver = false
+    private var gazeWarned = false
+    private var gazeNanos = 0L
+    private const val GAZE_HOLD_NANOS = 500_000_000L // keep the last gaze through blinks
 
     val eyeFb = arrayOfNulls<Any>(2)
     var eyeW = 0
@@ -114,6 +126,10 @@ object Hooks {
                     "recenterKey" -> recenterKey = v.toInt()
                     "mirror" -> mirror = v.toBoolean()
                     "positional" -> positional = v.toBoolean()
+                    "foveation" ->
+                        if (v in setOf("eye", "fixed", "off")) foveation = v else log("bad value for $k: $v (eye, fixed or off)")
+                    "foveaInner" -> foveaInner = v.toFloat()
+                    "foveaOuter" -> foveaOuter = v.toFloat()
                     else -> log("unknown option $k")
                 }
             } catch (e: NumberFormatException) {
@@ -184,6 +200,7 @@ object Hooks {
                 log("headset put on; recentered")
             }
             if (poseValid) updateHead(fMc.get(er))
+            updateFovea()
         } catch (t: Throwable) {
             fail(t)
         }
@@ -304,10 +321,12 @@ object Hooks {
                     if (e > 0) OptiFineShaders.rearm()
                     OptiFineShaders.beginEye(e)
                 }
+                if (foveaOn) Native.foveationBegin(e, foveaCenter[2 * e], foveaCenter[2 * e + 1], foveaInner, foveaOuter)
                 callOriginalPass(er, pass, partialTicks, finishTimeNano)
             } catch (ex: ReflectiveOperationException) {
                 fail(ex)
             } finally {
+                if (foveaOn) Native.foveationEnd()
                 inEye = false
                 if (shaders) {
                     try {
@@ -382,7 +401,8 @@ object Hooks {
             dead = true
             return
         }
-        val err = Native.init()
+        val inputDir = if (foveation == "eye") File(Agent.cacheDir, "input").takeIf { it.mkdirs() || it.isDirectory } else null
+        val err = Native.init(inputDir?.absolutePath)
         if (err != null) {
             log("OpenVR not started: $err. Press the recenter key (default Home) to retry.")
             return
@@ -395,6 +415,52 @@ object Hooks {
         needZero = true
         active = true
         log("VR active, eye buffers ${eyeW}x$eyeH")
+        initFovea()
+    }
+
+    private fun initFovea() {
+        foveaOk = false
+        foveaOn = false
+        if (foveation == "off") return
+        val err = Native.foveationInit(eyeW, eyeH)
+        if (err != null) {
+            log("foveated rendering unavailable: $err")
+            return
+        }
+        foveaOk = true
+        val center = if (foveation == "eye") "eye-tracked when the headset provides gaze" else "fixed at the lens center"
+        log("foveated rendering ready ($center): full rate within ${foveaInner}°, 2x2 to ${foveaOuter}°, 4x4 beyond")
+    }
+
+    /**
+     * Picks this frame's fovea center: the eye-tracked gaze, the last gaze for a moment while
+     * tracking drops out (blinks), then the lens center. A headset that never reports gaze
+     * isn't foveated in "eye" mode; use foveation=fixed for that.
+     */
+    private fun updateFovea() {
+        foveaOn = false
+        if (!foveaOk) return
+        if (foveation == "fixed") {
+            foveaCenter.fill(Float.NaN)
+            foveaOn = true
+            return
+        }
+        val now = System.nanoTime()
+        if (Native.eyeGaze(gaze)) {
+            if (!gazeEver) log("eye tracking active; foveating around gaze")
+            gazeEver = true
+            gazeNanos = now
+        }
+        if (!gazeEver) {
+            if (gazeNanos == 0L) gazeNanos = now
+            if (now - gazeNanos > 10_000_000_000L && !gazeWarned) {
+                gazeWarned = true
+                log("no eye gaze from SteamVR after 10 s, so nothing is foveated. Check that eye tracking is on in SteamVR's settings and that Steam Link shares eye tracking data with apps, or use foveation=fixed.")
+            }
+            return
+        }
+        if (now - gazeNanos < GAZE_HOLD_NANOS) gaze.copyInto(foveaCenter) else foveaCenter.fill(Float.NaN)
+        foveaOn = true
     }
 
     private fun drainNativeLog() {
@@ -406,6 +472,7 @@ object Hooks {
         active = false
         poseValid = false
         inEye = false
+        foveaOn = false
     }
 
     private fun fail(t: Throwable) {
