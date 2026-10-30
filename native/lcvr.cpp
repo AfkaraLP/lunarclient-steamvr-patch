@@ -901,6 +901,15 @@ JNIEXPORT void JNICALL Java_lcvr_Native_foveationEnd(JNIEnv*, jclass) {
     p_glBindShadingRateImageNV(0);
 }
 
+// Pauses/resumes variable rate shading inside an eye pass, keeping the eye's rate image.
+// Full-screen passes (OptiFine composites) must run at full rate: a coarse fragment there
+// samples color and depth once per 4x4 block, which turns edges into crawling blocks.
+JNIEXPORT void JNICALL Java_lcvr_Native_foveationEnable(JNIEnv*, jclass, jboolean on) {
+    if (!g_foveaOk) return;
+    if (on) p_glEnable(GL_SHADING_RATE_IMAGE_NV);
+    else p_glDisable(GL_SHADING_RATE_IMAGE_NV);
+}
+
 JNIEXPORT jstring JNICALL Java_lcvr_Native_drainLog(JNIEnv* env, jclass) {
     if (g_log.empty()) return nullptr;
     jstring s = env->NewStringUTF(g_log.c_str());

@@ -21,6 +21,8 @@ import org.objectweb.asm.Opcodes
  * - every Project.gluPerspective call: routed through the agent so eye passes use the
  *   headset's per-eye projection
  *
+ * and, when present, OptiFine's net.optifine.shaders.Shaders (see [patchShaders]).
+ *
  * Only straight-line code is injected, so the existing stack map frames stay valid and no
  * frame recomputation (which would need to load game classes) is required.
  */
@@ -28,6 +30,14 @@ class Patcher : ClassFileTransformer {
     override fun transform(
         loader: ClassLoader?, name: String?, redefined: Class<*>?, pd: ProtectionDomain?, bytes: ByteArray,
     ): ByteArray? {
+        if (name == SHADERS) {
+            return try {
+                patchShaders(bytes)
+            } catch (t: Throwable) {
+                Hooks.log("failed to patch OptiFine Shaders, foveation also covers its composite passes: $t")
+                null
+            }
+        }
         if (name != TARGET) return null
         return try {
             gameLoader = loader
@@ -44,6 +54,7 @@ class Patcher : ClassFileTransformer {
     companion object {
         const val HOOKS_KEY = "lcvr.hooks"
         const val TARGET = "net/minecraft/client/renderer/EntityRenderer"
+        const val SHADERS = "net/optifine/shaders/Shaders"
         const val FIELD = "lcvr\$hooks"
         const val MH = "java/lang/invoke/MethodHandle"
         const val MH_ARRAY = "[Ljava/lang/invoke/MethodHandle;"
@@ -59,7 +70,9 @@ class Patcher : ClassFileTransformer {
         const val H_PERSPECTIVE = 5
         const val H_WORLD_PRE = 6
         const val H_WORLD_POST = 7
-        const val HOOK_COUNT = 8
+        const val H_FULLSCREEN_PRE = 8
+        const val H_FULLSCREEN_POST = 9
+        const val HOOK_COUNT = 10
 
         const val D_FRAME_PRE = "(Ljava/lang/Object;FJ)V"
         const val D_THIS = "(Ljava/lang/Object;)V"
@@ -84,6 +97,58 @@ class Patcher : ClassFileTransformer {
                 "EntityRenderer does not look like Minecraft 1.8.9 with MCP names"
             }
             return cw.toByteArray()
+        }
+
+        /**
+         * OptiFine's net.optifine.shaders.Shaders: renderComposites (deferred and composite
+         * programs) and renderFinal draw full-screen quads; the agent is told around them so
+         * foveated shading can pause there.
+         */
+        @JvmStatic
+        fun patchShaders(input: ByteArray): ByteArray {
+            val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+            var patched = 0
+            ClassReader(input).accept(
+                object : ClassVisitor(Opcodes.ASM9, cw) {
+                    override fun visitMethod(access: Int, name: String, desc: String, sig: String?, exc: Array<String>?): MethodVisitor {
+                        val mv = super.visitMethod(access, name, desc, sig, exc)
+                        if (!(name == "renderComposites" && desc == "([Lnet/optifine/shaders/Program;Z)V") &&
+                            !(name == "renderFinal" && desc == "()V")
+                        ) {
+                            return mv
+                        }
+                        patched++
+                        return object : MethodVisitor(Opcodes.ASM9, mv) {
+                            override fun visitCode() {
+                                super.visitCode()
+                                invokeHookFromProperties(this.mv, H_FULLSCREEN_PRE)
+                            }
+
+                            override fun visitInsn(op: Int) {
+                                if (op == Opcodes.RETURN) invokeHookFromProperties(this.mv, H_FULLSCREEN_POST)
+                                super.visitInsn(op)
+                            }
+                        }
+                    }
+                },
+                0,
+            )
+            Hooks.log("patched OptiFine Shaders: $patched full-screen pass methods")
+            return cw.toByteArray()
+        }
+
+        /**
+         * `((MethodHandle[]) System.getProperties().get(HOOKS_KEY))[index].invokeExact()`, for
+         * classes that don't get a cached hooks field. Only used a few times per eye pass.
+         */
+        private fun invokeHookFromProperties(mv: MethodVisitor, index: Int) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "getProperties", "()Ljava/util/Properties;", false)
+            mv.visitLdcInsn(HOOKS_KEY)
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Hashtable", "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false)
+            mv.visitTypeInsn(Opcodes.CHECKCAST, MH_ARRAY)
+            mv.visitIntInsn(Opcodes.BIPUSH, index)
+            mv.visitInsn(Opcodes.AALOAD)
+            mv.invokeHook("()V")
         }
 
         /** Emits `lcvr$hooks[index]` (a MethodHandle) onto the stack. */

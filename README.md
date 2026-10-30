@@ -164,8 +164,10 @@ everything renders as before.
   second, then the lens center is used until tracking returns.
 - Without eye tracking, `foveation=eye` does nothing. `foveation=fixed` foveates around the
   lens center on any headset.
-- Only the world and hand are foveated. The HUD, menus and the OptiFine shadow map are always
-  full rate.
+- Only the world and hand geometry are foveated. The HUD, menus, the OptiFine shadow map and
+  OptiFine's full-screen deferred, composite and final passes are always full rate. Coarse
+  shading in those passes would sample color and depth once per block, which leaks sky
+  through block edges and makes the periphery crawl.
 - The gain depends on where the frame time goes. Vanilla Minecraft is mostly limited by the CPU,
   so expect little there. Shader packs are limited by fragment shading, and that's where it helps.
   Keep the shader pack's **Render Quality** at 1x, since the rate image is sized for the eye buffer.

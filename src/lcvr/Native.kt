@@ -62,4 +62,7 @@ object Native {
     @JvmStatic external fun foveationBegin(eye: Int, cx: Float, cy: Float, inner: Float, outer: Float)
 
     @JvmStatic external fun foveationEnd()
+
+    /** Pauses (false) or resumes (true) foveated shading between foveationBegin and foveationEnd. */
+    @JvmStatic external fun foveationEnable(on: Boolean)
 }

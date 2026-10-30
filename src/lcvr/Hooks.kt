@@ -73,6 +73,8 @@ object Hooks {
 
     private var foveaOk = false
     var foveaOn = false // foveate this frame's eye passes
+    private var foveaLive = false // inside an eye pass with foveation begun
+    private var fullscreenDepth = 0
     val gaze = FloatArray(4) // last valid gaze, NDC per eye
     val foveaCenter = FloatArray(4) // what this frame foveates around; NaN = lens center
     private var gazeEver = false
@@ -163,6 +165,8 @@ object Hooks {
         h[Patcher.H_PERSPECTIVE] = hook("perspective", f, f, f, f)
         h[Patcher.H_WORLD_PRE] = hook("worldPre", obj)
         h[Patcher.H_WORLD_POST] = hook("worldPost", obj)
+        h[Patcher.H_FULLSCREEN_PRE] = hook("fullscreenPre")
+        h[Patcher.H_FULLSCREEN_POST] = hook("fullscreenPost")
         return h
     }
 
@@ -321,12 +325,19 @@ object Hooks {
                     if (e > 0) OptiFineShaders.rearm()
                     OptiFineShaders.beginEye(e)
                 }
-                if (foveaOn) Native.foveationBegin(e, foveaCenter[2 * e], foveaCenter[2 * e + 1], foveaInner, foveaOuter)
+                if (foveaOn) {
+                    Native.foveationBegin(e, foveaCenter[2 * e], foveaCenter[2 * e + 1], foveaInner, foveaOuter)
+                    fullscreenDepth = 0
+                    foveaLive = true
+                }
                 callOriginalPass(er, pass, partialTicks, finishTimeNano)
             } catch (ex: ReflectiveOperationException) {
                 fail(ex)
             } finally {
-                if (foveaOn) Native.foveationEnd()
+                if (foveaLive) {
+                    foveaLive = false
+                    Native.foveationEnd()
+                }
                 inEye = false
                 if (shaders) {
                     try {
@@ -345,6 +356,21 @@ object Hooks {
         } catch (t: Throwable) {
             fail(t)
         }
+    }
+
+    /**
+     * Around OptiFine's full-screen passes (Shaders.renderComposites and renderFinal): those
+     * run at full rate, since coarse shading there samples color and depth once per block and
+     * leaks sky through block edges. Nests, since the passes may call each other.
+     */
+    @JvmStatic
+    fun fullscreenPre() {
+        if (fullscreenDepth++ == 0 && foveaLive) Native.foveationEnable(false)
+    }
+
+    @JvmStatic
+    fun fullscreenPost() {
+        if (fullscreenDepth > 0 && --fullscreenDepth == 0 && foveaLive) Native.foveationEnable(true)
     }
 
     @JvmStatic
